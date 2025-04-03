@@ -1,51 +1,131 @@
 # 将模型转换为 ONNX 格式并保存
 def with_cache_convert(model: AttentionWithCache, save_path='model.onnx') -> None:
-    model.eval()  # 设置模型为评估模式
+    """
+    将带有缓存机制的注意力模型转换为ONNX格式并保存。
     
-    # 创建虚拟输入数据
-    dummy_input = torch.randn(1, 10, model.hidden_size, device=device)  # 假设输入的 batch_size=1, sequence_length=10
-    dummy_key_cache = torch.randn(1, model.num_heads, 0, model.head_dim, device=device)  # 初始 key 缓存为空
-    dummy_value_cache = torch.randn(1, model.num_heads, 0, model.head_dim, device=device)  # 初始 value 缓存为空
+    这个函数将PyTorch模型转换为ONNX格式，使其可以在各种支持ONNX的推理引擎上运行。
+    转换过程会保留模型的KV缓存机制，这对于自回归生成任务(如文本生成)非常重要。
     
-    # 导出 ONNX 模型
+    参数:
+        model (AttentionWithCache): 需要转换的注意力模型，包含缓存机制
+        save_path (str): 保存ONNX模型的文件路径，默认为'model.onnx'
+        
+    返回:
+        None: 函数不返回任何值，但会在指定路径保存ONNX模型文件
+    """
+    model.eval()  # 设置模型为评估模式，禁用dropout等训练特定层，确保推理结果一致性
+    
+    # 创建虚拟输入数据，用于追踪模型的计算图
+    dummy_input = torch.randn(1, 10, model.hidden_size, device=device)  
+    # batch_size=1: 单个样本
+    # sequence_length=10: 序列长度为10的token序列
+    # model.hidden_size: 隐藏状态的维度大小
+    
+    dummy_key_cache = torch.randn(1, model.num_heads, 0, model.head_dim, device=device)  
+    # 初始key缓存为空 (第三维为0表示没有历史序列)
+    # 1: batch_size
+    # model.num_heads: 注意力头的数量
+    # 0: 初始缓存中没有历史token
+    # model.head_dim: 每个注意力头的维度大小
+    
+    dummy_value_cache = torch.randn(1, model.num_heads, 0, model.head_dim, device=device)  
+    # 初始value缓存为空，维度结构与key缓存相同
+    
+    # 导出模型为ONNX格式
     torch.onnx.export(
-        model,  
-        (dummy_input, dummy_key_cache, dummy_value_cache),  # 传入输入参数
-        save_path,  
-        export_params=True,  # 导出权重参数
-        opset_version=12,  # 使用 ONNX opset 版本 12
-        do_constant_folding=True,  # 进行常量折叠优化
-        input_names=["hidden_states", "key_cache", "value_cache"],  # 定义输入名称
-        output_names=["output", "new_key_cache", "new_value_cache"],  # 定义输出名称
-        dynamic_axes={  # 设置动态轴，以支持不同批次大小和序列长度
-            "hidden_states": {0: "batch_size", 1: "sequence_length"},  # hidden_states 的 batch 维度和序列长度维度是动态的
-            "key_cache": {0: "batch_size", 2: "past_sequence_length"},  # key_cache 的 batch 维度和 past 序列长度维度是动态的
-            "value_cache": {0: "batch_size", 2: "past_sequence_length"},  # value_cache 的 batch 维度和 past 序列长度维度是动态的
-            "output": {0: "batch_size", 1: "sequence_length"},  # 输出的 batch 维度和序列长度维度是动态的
-            "new_key_cache": {0: "batch_size", 2: "total_sequence_length"},  # new_key_cache 的 batch 维度和完整序列长度是动态的
-            "new_value_cache": {0: "batch_size", 2: "total_sequence_length"},  # new_value_cache 的 batch 维度和完整序列长度是动态的
+        model,  # 要转换的PyTorch模型
+        (dummy_input, dummy_key_cache, dummy_value_cache),  # 模型的输入参数元组
+        save_path,  # 输出文件路径
+        export_params=True,  # 导出模型的权重参数
+        opset_version=12,  # 使用ONNX操作集版本12，确保兼容性
+        do_constant_folding=True,  # 启用常量折叠优化，将常量计算预先执行以提高推理速度
+        input_names=["hidden_states", "key_cache", "value_cache"],  # 定义ONNX模型输入节点的名称
+        output_names=["output", "new_key_cache", "new_value_cache"],  # 定义ONNX模型输出节点的名称
+        dynamic_axes={  
+            # 设置动态轴，使模型能够处理不同批次大小和序列长度的输入
+            "hidden_states": {
+                0: "batch_size",      # 第0维（批次大小）可变
+                1: "sequence_length"  # 第1维（序列长度）可变
+            },  
+            "key_cache": {
+                0: "batch_size",           # 第0维（批次大小）可变
+                2: "past_sequence_length"  # 第2维（历史序列长度）可变
+            },  
+            "value_cache": {
+                0: "batch_size",           # 第0维（批次大小）可变
+                2: "past_sequence_length"  # 第2维（历史序列长度）可变
+            },  
+            "output": {
+                0: "batch_size",      # 第0维（批次大小）可变
+                1: "sequence_length"  # 第1维（序列长度）可变
+            },  
+            "new_key_cache": {
+                0: "batch_size",            # 第0维（批次大小）可变
+                2: "total_sequence_length"  # 第2维（总序列长度 = 历史 + 当前）可变
+            },  
+            "new_value_cache": {
+                0: "batch_size",            # 第0维（批次大小）可变
+                2: "total_sequence_length"  # 第2维（总序列长度 = 历史 + 当前）可变
+            }
         }
     )
+    # 完成后，ONNX模型将被保存到指定路径
+
 
 # 使用 ONNX 运行模型，并返回输出及更新的缓存
 def onnx_test_with_cache(hidden_states: np.ndarray, key_cache: Optional[np.ndarray] = None, value_cache: Optional[np.ndarray] = None, model_path: str='model.onnx') -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    sess = ort.InferenceSession(model_path)  # 加载 ONNX 模型
+    """
+    使用ONNX运行时执行转换后的模型，实现带缓存的注意力计算。
     
-    # 初始化 key_cache 和 value_cache，如果未提供，则创建空缓存
+    这个函数加载ONNX模型并执行推理，支持KV缓存机制以加速自回归生成。
+    对于初始推理，可以不提供缓存；对于后续token生成，应传入前一步更新的缓存。
+    
+    参数:
+        hidden_states (np.ndarray): 输入隐藏状态，形状为[batch_size, sequence_length, hidden_size]
+        key_cache (Optional[np.ndarray]): 键缓存，形状为[batch_size, num_heads, past_length, head_dim]，默认为None
+        value_cache (Optional[np.ndarray]): 值缓存，形状为[batch_size, num_heads, past_length, head_dim]，默认为None
+        model_path (str): ONNX模型文件路径，默认为'model.onnx'
+        
+    返回:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: 
+            - 模型输出，形状为[batch_size, sequence_length, hidden_size]
+            - 更新后的键缓存，形状为[batch_size, num_heads, total_length, head_dim]
+            - 更新后的值缓存，形状为[batch_size, num_heads, total_length, head_dim]
+    """
+    sess = ort.InferenceSession(model_path)  # 加载ONNX模型，创建推理会话
+    
+    # 初始化键缓存和值缓存（如果未提供）
     if key_cache is None:
-        key_cache = np.zeros((hidden_states.shape[0], 8, 0, hidden_states.shape[2] // 8), dtype=np.float32)
-    if value_cache is None:
-        value_cache = np.zeros((hidden_states.shape[0], 8, 0, hidden_states.shape[2] // 8), dtype=np.float32)
+        # 创建空键缓存数组：
+        # - 批次大小与输入相同
+        # - 假设有8个注意力头
+        # - 初始长度为0（无历史缓存）
+        # - 每个头的维度是hidden_size除以头数
+        key_cache = np.zeros(
+            (hidden_states.shape[0], 8, 0, hidden_states.shape[2] // 8), 
+            dtype=np.float32
+        )
     
-    # 构造 ONNX 模型的输入
+    if value_cache is None:
+        # 创建空值缓存数组，维度结构与键缓存相同
+        value_cache = np.zeros(
+            (hidden_states.shape[0], 8, 0, hidden_states.shape[2] // 8), 
+            dtype=np.float32
+        )
+    
+    # 构造ONNX模型的输入字典
     inputs = {
-        "hidden_states": hidden_states,
-        "key_cache": key_cache,
-        "value_cache": value_cache
+        "hidden_states": hidden_states,  # 当前输入的隐藏状态
+        "key_cache": key_cache,          # 键缓存（可能为空或包含历史数据）
+        "value_cache": value_cache       # 值缓存（可能为空或包含历史数据）
     }
     
-    # 运行 ONNX 推理
+    # 执行ONNX模型推理
+    # outputs是一个列表，按照export时定义的output_names顺序包含所有输出
     outputs = sess.run(None, inputs)
     
-    # 返回模型输出以及更新后的缓存
+    # 返回模型的三个输出：
+    # outputs[0]: 模型的主输出（注意力计算结果）
+    # outputs[1]: 更新后的键缓存（包含历史和当前token的键向量）
+    # outputs[2]: 更新后的值缓存（包含历史和当前token的值向量）
     return outputs[0], outputs[1], outputs[2]

@@ -1,0 +1,61 @@
+class SegModel:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, file_path='model.pth'):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(SegModel, cls).__new__(cls)
+                
+                # 创建模型
+                model = FCNImageSegmenter()
+                
+                # 加载模型权重
+                try:
+                    model.load_state_dict(torch.load(file_path))
+                    model.eval()  # 设置为评估模式
+                except Exception as e:
+                    print(f"Error loading model: {e}")
+                    # 如果无法加载模型，仍然创建一个新模型
+                    pass
+                
+                # 将模型保存到实例
+                cls._instance.model = model
+                
+        return cls._instance
+    
+    # 添加parameters方法，以便测试可以访问模型参数
+    def parameters(self):
+        return self.model.parameters()
+
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    data = request.get_json()
+    inputs = data['inputs']
+    
+    # 创建SegModel实例（由于是单例模式，只会创建一次）
+    model = SegModel()
+    
+    # 将输入转换为张量
+    input_tensor = torch.tensor(inputs, dtype=torch.float32)
+    
+    # 使用模型进行预测
+    with torch.no_grad():
+        output = model.model(input_tensor)
+    
+    # 获取主要输出（FCN模型返回字典，包含'out'和可能的'aux'）
+    if isinstance(output, dict):
+        output = output['out']
+    
+    # 获取预测类别（取最大值的索引）
+    _, predicted = torch.max(output.data, 1)
+    
+    # 去掉批次维度（从 [1, height, width] 到 [height, width]）
+    predicted = predicted.squeeze(0)
+    
+    # 将张量转换为列表
+    predicted_list = predicted.cpu().numpy().tolist()
+    
+    # 返回JSON响应
+    return jsonify({"output": predicted_list})
